@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Power Sandbox (Paste Code)</title>
+  <title>Power Sandbox (Paste Code) — Enhanced Dummy FX</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0f14; color:#e6edf3; }
@@ -21,7 +21,7 @@
     .side .card { display:flex; flex-direction:column; min-height:0; }
     .side .body { padding:10px; display:flex; flex-direction:column; gap:10px; min-height:0; }
     textarea {
-      width:100%; min-height: 220px; resize: vertical;
+      width:100%; min-height: 260px; resize: vertical;
       background:#0b111a; color:#e6edf3; border:1px solid #2b3d57; border-radius:10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.35;
       padding:10px; box-sizing:border-box;
@@ -44,7 +44,8 @@
         <button class="btn primary" id="btnFire">Fire <span class="kbd">Space</span></button>
         <button class="btn" id="btnReset">Reset Arena</button>
         <span class="pill" id="statusPill">No power loaded</span>
-        <span style="margin-left:auto" class="small">Aim with mouse • Move <span class="kbd">WASD</span></span>
+        <span class="pill" id="hpPill">HP — Player: 100 | Dummy: 300</span>
+        <span style="margin-left:auto" class="small">Aim: mouse • Move <span class="kbd">WASD</span></span>
       </div>
       <canvas id="cv"></canvas>
     </div>
@@ -66,9 +67,7 @@
             <button class="btn" id="btnClear">Clear</button>
             <button class="btn" id="btnCopyLastPower">Copy Last Loaded</button>
           </div>
-          <div class="small">
-            Console / errors:
-          </div>
+          <div class="small">Console / errors:</div>
           <div class="log" id="log"></div>
         </div>
       </div>
@@ -77,11 +76,10 @@
 
 <script>
 /**
- * POWER SANDBOX CORE
+ * POWER SANDBOX (Enhanced Dummy FX)
  * - Arena: left = player, right = dummy.
  * - Paste code defines a projectile/blast power with custom:
  *   shape, trail, speed, damage, onHitCharacter, dummy effect
- * - Your pasted code must call registerPower({...})
  *
  * SECURITY NOTE:
  * This uses Function() to run pasted JS. Only paste code you trust.
@@ -94,7 +92,6 @@
   const now = () => performance.now();
 
   function randSeeded(seed) {
-    // small deterministic RNG
     let s = seed >>> 0;
     return () => {
       s = (s * 1664525 + 1013904223) >>> 0;
@@ -107,6 +104,7 @@
   const ctx = cv.getContext("2d");
   const logEl = document.getElementById("log");
   const statusPill = document.getElementById("statusPill");
+  const hpPill = document.getElementById("hpPill");
 
   const powerCodeEl = document.getElementById("powerCode");
   const btnLoadPower = document.getElementById("btnLoadPower");
@@ -142,8 +140,21 @@
     dt: 0,
     last: now(),
 
-    player: { x: 140, y: 220, r: 16, hp: 100, hitFx: [] },
-    dummy:  { x: 0, y: 0, w: 54, h: 90, hp: 999, state: "normal", fx: [], split: null },
+    player: { x: 140, y: 220, r: 16, hp: 100, maxHp: 100, isDead:false, respawnAt:0, hitFx: [], deathFx: [] },
+
+    dummy: {
+      x: 0, y: 0, w: 54, h: 90, hp: 300, maxHp: 300, isDead:false, respawnAt:0, deathFx: [],
+      effects: {
+        phys: { vx: 0, vy: 0, spin: 0, shake: 0 },
+        deform: { squash: 0, stretch: 0, shearX: 0, wave: 0 },
+        surface: { heat: 0, frost: 0, corrosion: 0, wet: 0, tint: 0 },
+        fracture: { amount: 0, seed: 12345, lines: [] },
+        aura: { intensity: 0, radius: 0, flicker: 0, hue: 190 },
+        disintegrate: { amount: 0, shedRate: 0, eraseTo: 0 },
+        slice: { active: false, parts: [] },
+        status: { poisoned: 0, bleeding: 0 }
+      }
+    },
 
     projectiles: [],
     particles: [],
@@ -153,24 +164,146 @@
     keys: new Set(),
   };
 
+  // ---------- Dummy effect helpers ----------
+  function dummyCenter(d) {
+    return { cx: d.x + d.w * 0.5, cy: d.y + d.h * 0.5 };
+  }
+
+  function addKnockback(d, vx, vy, spin = 0) {
+    d.effects.phys.vx += vx;
+    d.effects.phys.vy += vy;
+    d.effects.phys.spin += spin;
+    d.effects.phys.shake = Math.min(1, d.effects.phys.shake + 0.6);
+  }
+
+  function genCracks(d, seed, count) {
+    let s = seed >>> 0;
+    const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0, (s & 0xfffffff) / 0x10000000);
+
+    const lines = [];
+    const { cx, cy } = dummyCenter(d);
+
+    for (let i = 0; i < count; i++) {
+      const x0 = d.x + rnd() * d.w;
+      const y0 = d.y + rnd() * d.h;
+      const pts = [{ x: x0, y: y0 }];
+
+      const segs = 3 + Math.floor(rnd() * 6);
+      let x = x0, y = y0;
+      for (let k = 0; k < segs; k++) {
+        const a = rnd() * Math.PI * 2;
+        const step = 6 + rnd() * 16;
+        x += Math.cos(a) * step;
+        y += Math.sin(a) * step;
+        x = Math.max(d.x, Math.min(d.x + d.w, x));
+        y = Math.max(d.y, Math.min(d.y + d.h, y));
+        pts.push({ x, y });
+      }
+
+      if (rnd() < 0.35) pts.push({ x: cx, y: cy });
+      lines.push(pts);
+    }
+    return lines;
+  }
+
+  function addFracture(d, amount, seed = ((Math.random() * 1e9) | 0)) {
+    d.effects.fracture.amount = Math.min(1, d.effects.fracture.amount + amount);
+    d.effects.fracture.seed = seed;
+    d.effects.fracture.lines = genCracks(d, seed, 10 + Math.floor(18 * d.effects.fracture.amount));
+  }
+
+  function setAura(d, intensity, radius, hue = 190, flicker = 0.6) {
+    d.effects.aura.intensity = Math.max(d.effects.aura.intensity, intensity);
+    d.effects.aura.radius = Math.max(d.effects.aura.radius, radius);
+    d.effects.aura.hue = hue;
+    d.effects.aura.flicker = flicker;
+  }
+
+  function setSurface(d, { heat=0, frost=0, corrosion=0, wet=0, tint=0 } = {}) {
+    d.effects.surface.heat = Math.max(d.effects.surface.heat, heat);
+    d.effects.surface.frost = Math.max(d.effects.surface.frost, frost);
+    d.effects.surface.corrosion = Math.max(d.effects.surface.corrosion, corrosion);
+    d.effects.surface.wet = Math.max(d.effects.surface.wet, wet);
+    d.effects.surface.tint = Math.max(d.effects.surface.tint, tint);
+  }
+
+  function startDisintegration(d, amount, shedRate = 60, eraseTo = 0.6) {
+    d.effects.disintegrate.amount = Math.max(d.effects.disintegrate.amount, amount);
+    d.effects.disintegrate.shedRate = Math.max(d.effects.disintegrate.shedRate, shedRate);
+    d.effects.disintegrate.eraseTo = Math.max(d.effects.disintegrate.eraseTo, eraseTo);
+  }
+
+  function setStatus(d, { poisoned=0, bleeding=0 } = {}) {
+    d.effects.status.poisoned = Math.max(d.effects.status.poisoned, poisoned);
+    d.effects.status.bleeding = Math.max(d.effects.status.bleeding, bleeding);
+  }
+
+  function sliceDummy(d, partsCount = 2, directionAngle = 0.7) {
+    d.effects.slice.active = true;
+    d.effects.slice.parts = [];
+
+    const cols = Math.max(1, Math.round(Math.sqrt(partsCount)));
+    const rows = Math.max(1, Math.ceil(partsCount / cols));
+    const pw = d.w / cols;
+    const ph = d.h / rows;
+
+    let idx = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (idx >= partsCount) break;
+        const x = d.x + c * pw;
+        const y = d.y + r * ph;
+
+        const bias = (idx / Math.max(1, partsCount - 1)) - 0.5;
+        const sep = 90;
+        const vx = Math.cos(directionAngle) * sep * bias;
+        const vy = Math.sin(directionAngle) * sep * bias;
+
+        d.effects.slice.parts.push({
+          x, y, w: pw, h: ph,
+          vx, vy,
+          spin: (Math.random() * 2 - 1) * 2.2,
+          age: 0,
+          life: 1.2 + Math.random() * 0.7,
+          alpha: 1
+        });
+        idx++;
+      }
+    }
+  }
+
+  // ---------- World reset ----------
   function resetArena() {
     world.projectiles.length = 0;
     world.particles.length = 0;
-    world.player.hp = 100;
+    world.player.hp = world.player.maxHp;
+    world.player.isDead = false;
+    world.player.respawnAt = 0;
     world.player.hitFx.length = 0;
+    world.player.deathFx.length = 0;
 
-    world.dummy.hp = 999;
-    world.dummy.state = "normal";
-    world.dummy.fx.length = 0;
-    world.dummy.split = null;
-
-    // Place dummy on right half
+    // place dummy on right half
     const W = world.w(), H = world.h();
     world.player.x = 140;
     world.player.y = H * 0.5;
 
     world.dummy.x = W - 180;
     world.dummy.y = H * 0.5 - world.dummy.h * 0.5;
+    world.dummy.hp = world.dummy.maxHp;
+    world.dummy.isDead = false;
+    world.dummy.respawnAt = 0;
+    world.dummy.deathFx.length = 0;
+
+    // reset effects
+    const e = world.dummy.effects;
+    e.phys = { vx: 0, vy: 0, spin: 0, shake: 0 };
+    e.deform = { squash: 0, stretch: 0, shearX: 0, wave: 0 };
+    e.surface = { heat: 0, frost: 0, corrosion: 0, wet: 0, tint: 0 };
+    e.fracture = { amount: 0, seed: 12345, lines: [] };
+    e.aura = { intensity: 0, radius: 0, flicker: 0, hue: 190 };
+    e.disintegrate = { amount: 0, shedRate: 0, eraseTo: 0 };
+    e.slice = { active: false, parts: [] };
+    e.status = { poisoned: 0, bleeding: 0 };
 
     log("Arena reset.");
   }
@@ -197,18 +330,10 @@
 
   // ---------- Power API ----------
   function validatePower(p) {
-    const required = [
-      "meta", "createProjectile"
-    ];
-    for (const k of required) {
-      if (!(k in p)) throw new Error(`Power missing required field: ${k}`);
-    }
-    // meta checks
+    const required = ["meta", "createProjectile"];
+    for (const k of required) if (!(k in p)) throw new Error(`Power missing required field: ${k}`);
     const m = p.meta || {};
-    for (const k of ["name", "id", "description"]) {
-      if (!m[k]) throw new Error(`Power meta missing: meta.${k}`);
-    }
-    // createProjectile must return projectile spec
+    for (const k of ["name", "id", "description"]) if (!m[k]) throw new Error(`Power meta missing: meta.${k}`);
     if (typeof p.createProjectile !== "function") throw new Error(`createProjectile must be a function`);
   }
 
@@ -220,34 +345,57 @@
     log(`Loaded power: ${power.meta.name} (${power.meta.id})`);
   }
 
-  // Exposed to pasted scripts:
-  // registerPower({ meta:{...}, createProjectile(ctx){...} })
+  // exposed to pasted scripts
   function registerPower(powerDef) {
     setCurrentPower(powerDef, "__PASTED__");
   }
 
-  // "Game context" passed into power.createProjectile
   function powerContext() {
     return {
-      // Positions
       player: { x: world.player.x, y: world.player.y },
       mouse:  { x: world.mouse.x, y: world.mouse.y },
 
-      // Arena split
       arena: {
         width: world.w(),
         height: world.h(),
         midX: world.w() * 0.5
       },
 
-      // Utilities for custom behavior
       clamp, lerp,
 
-      // Visual spawning helpers (optional for powers)
       spawnParticle: (pt) => world.particles.push(pt),
 
-      // Deterministic randomness for power-specific visuals
-      rng: randSeeded((Math.random() * 1e9) | 0)
+      applyDamageToPlayer: (amount, sourceProjectile) => applyDamageToCharacter(world.player, amount, sourceProjectile),
+      applyDamageToDummy: (amount, sourceProjectile) => {
+        const d = world.dummy;
+        if (d.isDead) return;
+        const prevHp = d.hp;
+        d.hp -= amount;
+        if (d.hp <= 0 && !d.isDead) {
+          d.isDead = true;
+          d.hp = 0;
+          d.respawnAt = world.time + 1.25;
+          if (sourceProjectile && sourceProjectile.onKillDummy) {
+            try {
+              sourceProjectile.onKillDummy({ world, projectile: sourceProjectile, dummy: d, damage: amount, prevHp, overkill: Math.max(0, -(prevHp - amount)), time: world.time });
+            } catch (e) {
+              log("onKillDummy ERROR: " + (e?.message || e));
+            }
+          }
+        }
+      },
+
+      rng: randSeeded((Math.random() * 1e9) | 0),
+
+      dummyHelpers: {
+        addKnockback: (vx, vy, spin) => addKnockback(world.dummy, vx, vy, spin),
+        addFracture: (amount, seed) => addFracture(world.dummy, amount, seed),
+        setAura: (intensity, radius, hue, flicker) => setAura(world.dummy, intensity, radius, hue, flicker),
+        setSurface: (opts) => setSurface(world.dummy, opts),
+        startDisintegration: (amount, shedRate, eraseTo) => startDisintegration(world.dummy, amount, shedRate, eraseTo),
+        setStatus: (opts) => setStatus(world.dummy, opts),
+        sliceDummy: (partsCount, directionAngle) => sliceDummy(world.dummy, partsCount, directionAngle)
+      }
     };
   }
 
@@ -259,17 +407,14 @@
     const ctxIn = powerContext();
     const spec = P.createProjectile(ctxIn);
 
-    // Required projectile fields
-    const must = ["speed", "damage", "shape", "trail", "onHitCharacter", "onHitDummy"];
-    for (const k of must) {
-      if (!(k in spec)) throw new Error(`Projectile spec missing: ${k}`);
-    }
+    const must = ["speed", "damage", "shape", "trail", "onHitCharacter", "onHitDummy"]; // onKillCharacter/onKillDummy optional
+    for (const k of must) if (!(k in spec)) throw new Error(`Projectile spec missing: ${k}`);
+
     if (typeof spec.shape.draw !== "function") throw new Error("shape.draw(ctx, proj, t) must be a function");
     if (typeof spec.trail.emit !== "function") throw new Error("trail.emit(world, proj, t) must be a function");
     if (typeof spec.onHitCharacter !== "function") throw new Error("onHitCharacter must be a function");
     if (typeof spec.onHitDummy !== "function") throw new Error("onHitDummy must be a function");
 
-    // Aim vector
     const dx = (world.mouse.x - world.player.x);
     const dy = (world.mouse.y - world.player.y);
     const len = Math.max(1e-6, Math.hypot(dx, dy));
@@ -282,15 +427,15 @@
       vx, vy,
       speed: spec.speed,
       damage: spec.damage,
-      life: spec.life ?? 2.8, // seconds
+      life: spec.life ?? 2.8,
       age: 0,
-      radius: spec.radius ?? 10, // collision radius
+      radius: spec.radius ?? 10,
       shape: spec.shape,
       trail: spec.trail,
       onHitCharacter: spec.onHitCharacter,
       onHitDummy: spec.onHitDummy,
-
-      // power-owned state bucket (so each projectile can be unique)
+      onKillCharacter: (typeof spec.onKillCharacter==="function") ? spec.onKillCharacter : null,
+      onKillDummy: (typeof spec.onKillDummy==="function") ? spec.onKillDummy : null,
       state: spec.state ?? {},
       meta: spec.meta ?? {}
     });
@@ -299,10 +444,8 @@
   // ---------- Fire ----------
   function fire() {
     try {
-      if (!world.currentPower) {
-        log("No power loaded.");
-        return;
-      }
+      if (!world.currentPower) return log("No power loaded.");
+      if (world.player.isDead) return log("Player is dead (respawning).");
       spawnProjectileFromPower();
     } catch (err) {
       log("FIRE ERROR: " + (err?.message || err));
@@ -312,7 +455,6 @@
 
   // ---------- Movement ----------
   function stepMovement(dt) {
-    // Player movement
     const sp = 220;
     let mx = 0, my = 0;
     if (world.keys.has("KeyW")) my -= 1;
@@ -325,14 +467,9 @@
     world.player.x += mx * sp * dt;
     world.player.y += my * sp * dt;
 
-    // Clamp player to left half
     const W = world.w(), H = world.h();
     world.player.x = clamp(world.player.x, 30, W * 0.5 - 30);
     world.player.y = clamp(world.player.y, 30, H - 30);
-
-    // Dummy stays on right half
-    world.dummy.x = clamp(world.dummy.x, W * 0.5 + 30, W - 30 - world.dummy.w);
-    world.dummy.y = clamp(world.dummy.y, 30, H - 30 - world.dummy.h);
   }
 
   // ---------- Collisions ----------
@@ -343,7 +480,52 @@
     return (dx*dx + dy*dy) <= r*r;
   }
 
-  function hitDummy(proj) {
+  
+  function applyDamageToCharacter(character, amount, sourceProj) {
+    if (character.isDead) return;
+    const prevHp = character.hp;
+    character.hp -= amount;
+    if (character.hp <= 0) {
+      character.isDead = true;
+      character.hp = 0;
+      character.respawnAt = world.time + 1.25;
+
+      if (sourceProj && sourceProj.onKillCharacter) {
+        try {
+          sourceProj.onKillCharacter({
+            world,
+            projectile: sourceProj,
+            character,
+            damage: amount,
+            prevHp,
+            overkill: Math.max(0, -(prevHp - amount)),
+            time: world.time
+          });
+        } catch (e) {
+          log("onKillCharacter ERROR: " + (e?.message || e));
+        }
+      } else {
+        // default death sparkle
+        for (let k = 0; k < 36; k++) {
+          const a = (k / 36) * Math.PI * 2;
+          const sp = 120 + Math.random() * 220;
+          world.particles.push({
+            x: character.x, y: character.y,
+            vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40,
+            life: 0.7, age: 0,
+            draw(g, pt) {
+              const t = 1 - pt.age / pt.life;
+              g.globalAlpha = Math.max(0, t) * 0.35;
+              g.fillStyle = "rgba(160,210,255,0.14)";
+              g.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+              g.globalAlpha = 1;
+            }
+          });
+        }
+      }
+    }
+  }
+function hitDummy(proj) {
     try {
       proj.onHitDummy({
         world,
@@ -351,6 +533,26 @@
         dummy: world.dummy,
         damage: proj.damage,
         spawnParticle: (pt) => world.particles.push(pt),
+
+      applyDamageToPlayer: (amount, sourceProjectile) => applyDamageToCharacter(world.player, amount, sourceProjectile),
+      applyDamageToDummy: (amount, sourceProjectile) => {
+        const d = world.dummy;
+        if (d.isDead) return;
+        const prevHp = d.hp;
+        d.hp -= amount;
+        if (d.hp <= 0 && !d.isDead) {
+          d.isDead = true;
+          d.hp = 0;
+          d.respawnAt = world.time + 1.25;
+          if (sourceProjectile && sourceProjectile.onKillDummy) {
+            try {
+              sourceProjectile.onKillDummy({ world, projectile: sourceProjectile, dummy: d, damage: amount, prevHp, overkill: Math.max(0, -(prevHp - amount)), time: world.time });
+            } catch (e) {
+              log("onKillDummy ERROR: " + (e?.message || e));
+            }
+          }
+        }
+      },
         time: world.time
       });
     } catch (e) {
@@ -358,7 +560,6 @@
     }
   }
 
-  // (Optional: if you later add enemies or self-damage)
   function hitCharacter(proj, character) {
     try {
       proj.onHitCharacter({
@@ -367,6 +568,26 @@
         character,
         damage: proj.damage,
         spawnParticle: (pt) => world.particles.push(pt),
+
+      applyDamageToPlayer: (amount, sourceProjectile) => applyDamageToCharacter(world.player, amount, sourceProjectile),
+      applyDamageToDummy: (amount, sourceProjectile) => {
+        const d = world.dummy;
+        if (d.isDead) return;
+        const prevHp = d.hp;
+        d.hp -= amount;
+        if (d.hp <= 0 && !d.isDead) {
+          d.isDead = true;
+          d.hp = 0;
+          d.respawnAt = world.time + 1.25;
+          if (sourceProjectile && sourceProjectile.onKillDummy) {
+            try {
+              sourceProjectile.onKillDummy({ world, projectile: sourceProjectile, dummy: d, damage: amount, prevHp, overkill: Math.max(0, -(prevHp - amount)), time: world.time });
+            } catch (e) {
+              log("onKillDummy ERROR: " + (e?.message || e));
+            }
+          }
+        }
+      },
         time: world.time
       });
     } catch (e) {
@@ -374,7 +595,167 @@
     }
   }
 
-  // ---------- Update loop ----------
+  // ---------- Dummy update (effects) ----------
+  function updateDummy(dt) {
+    const d = world.dummy;
+    const e = d.effects;
+
+    // physics integration
+    e.phys.vy += 220 * dt; // mild gravity-ish for "weight"
+    d.x += e.phys.vx * dt;
+    d.y += e.phys.vy * dt;
+
+    // damping
+    e.phys.vx *= Math.pow(0.12, dt);
+    e.phys.vy *= Math.pow(0.20, dt);
+    e.phys.spin *= Math.pow(0.10, dt);
+    e.phys.shake *= Math.pow(0.06, dt);
+
+    // keep dummy on right half
+    const W = world.w(), H = world.h();
+    d.x = clamp(d.x, W * 0.5 + 30, W - 30 - d.w);
+    d.y = clamp(d.y, 30, H - 30 - d.h);
+
+    // decay channels
+    e.deform.squash *= Math.pow(0.03, dt);
+    e.deform.stretch *= Math.pow(0.03, dt);
+    e.deform.shearX *= Math.pow(0.03, dt);
+    e.deform.wave *= Math.pow(0.05, dt);
+
+    e.surface.heat *= Math.pow(0.10, dt);
+    e.surface.frost *= Math.pow(0.10, dt);
+    e.surface.corrosion *= Math.pow(0.10, dt);
+    e.surface.wet *= Math.pow(0.10, dt);
+    e.surface.tint *= Math.pow(0.10, dt);
+
+    e.aura.intensity *= Math.pow(0.12, dt);
+    e.aura.radius *= Math.pow(0.12, dt);
+
+    e.fracture.amount *= Math.pow(0.06, dt);
+
+    e.disintegrate.amount *= Math.pow(0.02, dt);
+    e.status.poisoned *= Math.pow(0.06, dt);
+    e.status.bleeding *= Math.pow(0.12, dt);
+
+    // disintegration shedding
+    if (e.disintegrate.amount > 0.01) {
+      const shed = Math.floor(e.disintegrate.shedRate * e.disintegrate.amount * dt);
+      for (let i = 0; i < shed; i++) {
+        const ax = d.x + Math.random() * d.w;
+        const ay = d.y + Math.random() * d.h;
+        world.particles.push({
+          x: ax, y: ay,
+          vx: (Math.random() * 2 - 1) * 80,
+          vy: -40 - Math.random() * 120,
+          life: 0.55 + Math.random() * 0.55,
+          age: 0,
+          draw(g, pt) {
+            const a = 1 - pt.age / pt.life;
+            g.globalAlpha = Math.max(0, a) * 0.35;
+            g.fillStyle = "rgba(220,220,220,0.22)";
+            g.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+            g.globalAlpha = 1;
+          }
+        });
+      }
+      e.disintegrate.eraseTo = Math.max(e.disintegrate.eraseTo, 0.25 + 0.6 * e.disintegrate.amount);
+    } else {
+      e.disintegrate.eraseTo *= Math.pow(0.15, dt);
+    }
+
+    // slice parts physics
+    if (e.slice.active) {
+      for (let i = e.slice.parts.length - 1; i >= 0; i--) {
+        const p = e.slice.parts[i];
+        p.age += dt;
+        p.vy += 420 * dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vx *= Math.pow(0.20, dt);
+        p.vy *= Math.pow(0.30, dt);
+        p.alpha = Math.max(0, 1 - p.age / p.life);
+        if (p.age >= p.life) e.slice.parts.splice(i, 1);
+      }
+      if (e.slice.parts.length === 0) e.slice.active = false;
+    }
+
+    // bleeding / poison emitters (examples)
+    if (e.status.bleeding > 0.01 && Math.random() < 0.30 * e.status.bleeding) {
+      const ax = d.x + Math.random() * d.w;
+      const ay = d.y + Math.random() * d.h;
+      world.particles.push({
+        x: ax, y: ay,
+        vx: (Math.random() * 2 - 1) * 50,
+        vy: 40 + Math.random() * 140,
+        life: 0.6 + Math.random() * 0.6,
+        age: 0,
+        draw(g, pt) {
+          const a = 1 - pt.age / pt.life;
+          g.globalAlpha = Math.max(0, a) * 0.65;
+          g.fillStyle = "rgba(160,20,30,0.35)";
+          g.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+          g.globalAlpha = 1;
+        }
+      });
+    }
+
+    if (e.status.poisoned > 0.01 && Math.random() < 0.22 * e.status.poisoned) {
+      const ax = d.x + Math.random() * d.w;
+      const ay = d.y + Math.random() * d.h;
+      world.particles.push({
+        x: ax, y: ay,
+        vx: (Math.random() * 2 - 1) * 30,
+        vy: -20 - Math.random() * 60,
+        life: 0.7 + Math.random() * 0.7,
+        age: 0,
+        draw(g, pt) {
+          const a = 1 - pt.age / pt.life;
+          g.globalAlpha = Math.max(0, a) * 0.45;
+          g.fillStyle = "rgba(80,220,120,0.22)";
+          g.beginPath();
+          g.arc(pt.x, pt.y, 2 + a * 3, 0, Math.PI * 2);
+          g.fill();
+          g.globalAlpha = 1;
+        }
+      });
+    }
+  }
+
+  
+  function updateRespawns() {
+    const W = world.w(), H = world.h();
+
+    // dummy respawn
+    if (world.dummy.isDead && world.time >= world.dummy.respawnAt) {
+      // reset dummy body + effects
+      world.dummy.isDead = false;
+      world.dummy.hp = world.dummy.maxHp;
+      world.dummy.x = W - 180;
+      world.dummy.y = H * 0.5 - world.dummy.h * 0.5;
+      world.dummy.deathFx.length = 0;
+      // clear effects (keep helper reset logic minimal)
+      const e = world.dummy.effects;
+      e.phys = { vx: 0, vy: 0, spin: 0, shake: 0 };
+      e.deform = { squash: 0, stretch: 0, shearX: 0, wave: 0 };
+      e.surface = { heat: 0, frost: 0, corrosion: 0, wet: 0, tint: 0 };
+      e.fracture = { amount: 0, seed: 12345, lines: [] };
+      e.aura = { intensity: 0, radius: 0, flicker: 0, hue: 190 };
+      e.disintegrate = { amount: 0, shedRate: 0, eraseTo: 0 };
+      e.slice = { active: false, parts: [] };
+      e.status = { poisoned: 0, bleeding: 0 };
+    }
+
+    // player respawn
+    if (world.player.isDead && world.time >= world.player.respawnAt) {
+      world.player.isDead = false;
+      world.player.hp = world.player.maxHp;
+      world.player.x = 140;
+      world.player.y = H * 0.5;
+      world.player.deathFx.length = 0;
+      world.player.hitFx.length = 0;
+    }
+  }
+// ---------- Update loop ----------
   function update() {
     const t = now();
     world.dt = Math.min(0.033, (t - world.last) / 1000);
@@ -390,19 +771,62 @@
       p.x += p.vx * world.dt;
       p.y += p.vy * world.dt;
 
-      // trail emit (custom)
       try { p.trail.emit(world, p, world.time); }
       catch (e) { log("trail.emit ERROR: " + (e?.message || e)); }
 
       // collision with dummy
       const d = world.dummy;
-      if (circleRectCollides(p.x, p.y, p.radius, d.x, d.y, d.w, d.h)) {
+      if (!d.isDead && circleRectCollides(p.x, p.y, p.radius, d.x, d.y, d.w, d.h)) {
+        // apply damage
+        const prevHp = d.hp;
+        d.hp -= p.damage;
         hitDummy(p);
+
+        if (d.hp <= 0 && !d.isDead) {
+          d.isDead = true;
+          d.hp = 0;
+          d.respawnAt = world.time + 1.25;
+
+          // call custom death effect if provided
+          if (p.onKillDummy) {
+            try {
+              p.onKillDummy({
+                world,
+                projectile: p,
+                dummy: d,
+                damage: p.damage,
+                prevHp,
+                overkill: Math.max(0, - (prevHp - p.damage)),
+                time: world.time
+              });
+            } catch (e) {
+              log("onKillDummy ERROR: " + (e?.message || e));
+            }
+          } else {
+            // default death effect (subtle) if no custom provided
+            const cx = d.x + d.w * 0.5, cy = d.y + d.h * 0.5;
+            for (let k = 0; k < 40; k++) {
+              const a = (k / 40) * Math.PI * 2;
+              const sp = 120 + Math.random() * 220;
+              world.particles.push({
+                x: cx, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60,
+                life: 0.75, age: 0,
+                draw(g, pt) {
+                  const t = 1 - pt.age / pt.life;
+                  g.globalAlpha = Math.max(0, t) * 0.35;
+                  g.fillStyle = "rgba(255,255,255,0.10)";
+                  g.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+                  g.globalAlpha = 1;
+                }
+              });
+            }
+          }
+        }
+
         world.projectiles.splice(i, 1);
         continue;
       }
 
-      // out of bounds or expired
       const W = world.w(), H = world.h();
       if (p.age > p.life || p.x < -80 || p.y < -80 || p.x > W + 80 || p.y > H + 80) {
         world.projectiles.splice(i, 1);
@@ -421,12 +845,9 @@
       if (pt.update) pt.update(world, pt, world.dt);
     }
 
-    // Update dummy fx
-    for (let i = world.dummy.fx.length - 1; i >= 0; i--) {
-      const fx = world.dummy.fx[i];
-      fx.age = (fx.age ?? 0) + world.dt;
-      if (fx.life != null && fx.age >= fx.life) world.dummy.fx.splice(i, 1);
-    }
+    updateDummy(world.dt);
+
+    updateRespawns();
 
     render();
     requestAnimationFrame(update);
@@ -455,28 +876,38 @@
     ctx.stroke();
 
     // player
-    ctx.fillStyle = "#6fb1ff";
-    ctx.beginPath();
-    ctx.arc(world.player.x, world.player.y, world.player.r, 0, Math.PI * 2);
-    ctx.fill();
+    if (!world.player.isDead) {
+      ctx.fillStyle = "#6fb1ff";
+      ctx.beginPath();
+      ctx.arc(world.player.x, world.player.y, world.player.r, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // respawn marker
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "#6fb1ff";
+      ctx.beginPath();
+      ctx.arc(world.player.x, world.player.y, world.player.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
     // aim line
-    ctx.strokeStyle = "#1e3550";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(world.player.x, world.player.y);
-    ctx.lineTo(world.mouse.x, world.mouse.y);
-    ctx.stroke();
+    if (!world.player.isDead) {
+      ctx.strokeStyle = "#1e3550";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(world.player.x, world.player.y);
+      ctx.lineTo(world.mouse.x, world.mouse.y);
+      ctx.stroke();
+    }
 
     // dummy
     drawDummy(ctx, world.dummy);
 
     // particles
     for (const pt of world.particles) {
-      if (pt.draw) {
-        pt.draw(ctx, pt, world.time);
-      } else {
-        // default tiny spark
+      if (pt.draw) pt.draw(ctx, pt, world.time);
+      else {
         const a = 1 - (pt.age / (pt.life ?? 0.6));
         ctx.globalAlpha = clamp(a, 0, 1);
         ctx.fillStyle = pt.color ?? "#8bd3ff";
@@ -487,53 +918,166 @@
 
     // projectiles
     for (const p of world.projectiles) {
-      try { p.shape.draw(ctx, p, world.time); }
-      catch (e) { /* logged elsewhere */ }
+      try { p.shape.draw(ctx, p, world.time); } catch {}
     }
 
     // HUD
     ctx.fillStyle = "#b9c6d6";
     ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     ctx.fillText(`Projectiles: ${world.projectiles.length}`, 12, 18);
-    ctx.fillText(`Dummy state: ${world.dummy.state}`, 12, 34);
+    ctx.fillText(`Dummy FX: aura=${world.dummy.effects.aura.intensity.toFixed(2)} fracture=${world.dummy.effects.fracture.amount.toFixed(2)} dis=${world.dummy.effects.disintegrate.amount.toFixed(2)}`, 12, 34);
+
+    // UI HP
+    if (hpPill) hpPill.textContent = `HP — Player: ${world.player.hp}/${world.player.maxHp} | Dummy: ${world.dummy.hp}/${world.dummy.maxHp}`;
   }
 
   function drawDummy(ctx, d) {
-    // base dummy
+    if (d.isDead) {
+      // simple death placeholder (actual custom death effects should be done via particles or dummy.effects channels)
+      const cx = d.x + d.w * 0.5, cy = d.y + d.h * 0.5;
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = "rgba(255,185,105,0.22)";
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    const e = d.effects;
+    const { cx, cy } = dummyCenter(d);
+
+    const erase = clamp(e.disintegrate.eraseTo, 0, 0.95);
+    const baseAlpha = 1 - erase;
+
     ctx.save();
 
-    // dummy effects: e.g. vanish
-    if (d.state === "erased") {
-      ctx.globalAlpha = 0.08;
-    }
-    if (d.state === "phased") {
-      ctx.globalAlpha = 0.35;
+    // Aura behind
+    if (e.aura.intensity > 0.01) {
+      const flick = 0.75 + 0.25 * Math.sin(world.time * (6 + e.aura.flicker * 8));
+      const rad = Math.max(24, e.aura.radius) * (0.85 + 0.15 * flick);
+      ctx.globalAlpha = e.aura.intensity * 0.35 * flick;
+      ctx.strokeStyle = "rgba(180,240,255,0.22)";
+      ctx.lineWidth = 10;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     }
 
-    // body
-    ctx.fillStyle = "#ffb86b";
+    // sliced chunks
+    if (e.slice.active && e.slice.parts.length) {
+      for (const p of e.slice.parts) {
+        ctx.save();
+        ctx.globalAlpha = p.alpha * 0.9;
+        ctx.fillStyle = "rgba(255,185,105,0.85)";
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+
+        if (e.fracture.amount > 0.02) {
+          ctx.globalAlpha = p.alpha * e.fracture.amount * 0.6;
+          ctx.strokeStyle = "rgba(30,25,20,0.55)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(p.x + 2, p.y + 2);
+          ctx.lineTo(p.x + p.w - 2, p.y + p.h - 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      ctx.restore();
+      return;
+    }
+
+    // deform transform
+    const shake = e.phys.shake;
+    const shx = (Math.random() * 2 - 1) * 3 * shake;
+    const shy = (Math.random() * 2 - 1) * 3 * shake;
+
+    const squash = e.deform.squash;
+    const stretch = e.deform.stretch;
+    const shearX = e.deform.shearX;
+    const wave = e.deform.wave;
+
+    ctx.translate(cx + shx, cy + shy);
+    ctx.rotate(e.phys.spin * 0.02);
+    ctx.transform(1, 0, shearX * 0.25, 1, 0, 0);
+    const sx = 1 + stretch * 0.18 - squash * 0.14;
+    const sy = 1 + squash * 0.22 - stretch * 0.10;
+    ctx.scale(sx, sy);
+    ctx.translate(-cx, -cy);
+
+    // base body
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = "rgba(255,185,105,0.95)";
     ctx.fillRect(d.x, d.y, d.w, d.h);
 
-    // face mark
-    ctx.fillStyle = "#3a2a1a";
+    // face marks
+    ctx.fillStyle = "rgba(58,42,26,0.85)";
     ctx.fillRect(d.x + 10, d.y + 16, 8, 8);
     ctx.fillRect(d.x + d.w - 18, d.y + 16, 8, 8);
 
-    // split effect
-    if (d.split) {
-      const s = d.split;
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = s.color ?? "#d7f7ff";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(s.x1, s.y1);
-      ctx.lineTo(s.x2, s.y2);
-      ctx.stroke();
+    // surface overlays
+    const surf = e.surface;
+
+    if (surf.heat > 0.01) {
+      ctx.globalAlpha = baseAlpha * surf.heat * 0.45;
+      ctx.fillStyle = "rgba(255,120,60,0.25)";
+      ctx.fillRect(d.x, d.y, d.w, d.h);
+    }
+    if (surf.frost > 0.01) {
+      ctx.globalAlpha = baseAlpha * surf.frost * 0.45;
+      ctx.fillStyle = "rgba(170,230,255,0.20)";
+      ctx.fillRect(d.x, d.y, d.w, d.h);
+    }
+    if (surf.corrosion > 0.01) {
+      ctx.globalAlpha = baseAlpha * surf.corrosion * 0.45;
+      ctx.fillStyle = "rgba(80,220,120,0.16)";
+      ctx.fillRect(d.x, d.y, d.w, d.h);
+    }
+    if (surf.wet > 0.01) {
+      ctx.globalAlpha = baseAlpha * surf.wet * 0.35;
+      ctx.strokeStyle = "rgba(210,245,255,0.18)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(d.x + 1, d.y + 1, d.w - 2, d.h - 2);
+    }
+    if (surf.tint > 0.01) {
+      ctx.globalAlpha = baseAlpha * surf.tint * 0.35;
+      ctx.fillStyle = "rgba(200,245,255,0.12)";
+      ctx.fillRect(d.x, d.y, d.w, d.h);
     }
 
-    // fx overlays
-    for (const fx of d.fx) {
-      if (fx.draw) fx.draw(ctx, fx, world.time);
+    // fracture cracks
+    if (e.fracture.amount > 0.01 && e.fracture.lines.length) {
+      ctx.globalAlpha = baseAlpha * e.fracture.amount * 0.85;
+      ctx.strokeStyle = "rgba(30,25,20,0.55)";
+      ctx.lineWidth = 1.2;
+      for (const line of e.fracture.lines) {
+        ctx.beginPath();
+        for (let i = 0; i < line.length; i++) {
+          const p = line[i];
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // wave lines
+    if (wave > 0.01) {
+      ctx.globalAlpha = baseAlpha * wave * 0.35;
+      ctx.strokeStyle = "rgba(255,255,255,0.10)";
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 6; i++) {
+        const yy = d.y + (i + 1) * (d.h / 7);
+        const wig = Math.sin(world.time * 9 + i * 1.3) * (10 * wave);
+        ctx.beginPath();
+        ctx.moveTo(d.x - 6, yy);
+        ctx.quadraticCurveTo(d.x + d.w * 0.5 + wig, yy - 6, d.x + d.w + 6, yy);
+        ctx.stroke();
+      }
     }
 
     ctx.restore();
@@ -542,15 +1086,7 @@
   // ---------- Paste code loader ----------
   function loadPastedPower(code) {
     clearLog();
-
-    // Provide ONLY what power code needs.
-    // The power must call registerPower(...)
-    const sandboxGlobals = {
-      registerPower
-    };
-
-    // Execute in a tiny scope
-    // (Still runs JS: do not paste untrusted code.)
+    const sandboxGlobals = { registerPower };
     const fn = new Function(...Object.keys(sandboxGlobals), `"use strict";\n${code}\n`);
     fn(...Object.values(sandboxGlobals));
   }
@@ -560,9 +1096,7 @@
       const code = powerCodeEl.value.trim();
       if (!code) return log("Nothing to load.");
       loadPastedPower(code);
-      // Save last loaded code
       world.lastLoadedCode = code;
-      // If registerPower used, setCurrentPower already called.
       if (!world.currentPower) log("Loaded code did not call registerPower(...).");
     } catch (e) {
       log("LOAD ERROR: " + (e?.message || e));
@@ -591,13 +1125,17 @@ You are generating a SINGLE JavaScript power module for a projectile/blast sandb
 The output MUST be ONLY code. No markdown. No explanation.
 
 HARD REQUIREMENTS (minimum valid power):
+- This sandbox has HP + death. Player max HP = 100. Dummy max HP = 300.
+- Damage can exceed 100 (overkill allowed). If HP <= 0, death triggers.
+- OPTIONAL: Provide custom death effects via onKillDummy/onKillCharacter.
+
 - The power is a projectile/blast.
 - Projectile MUST have a custom shape made from scratch (unique geometry/visual form).
 - Projectile MUST have a custom trail (not a standard line; it must have unique behavior).
 - Custom travel speed (explicit numeric speed + any motion behavior if desired).
 - Custom damage (explicit numeric).
 - Custom on-hit effect for characters: entirely customized and specific.
-- Custom dummy effect: entirely customized and specific (e.g., slice, erase, transform, invert, shatter, etc.), not limited to a fixed list.
+- Custom dummy effect: entirely customized and specific (e.g., slice, erase, deform, fracture, aura, disintegrate, poison/blood, etc.), not limited to a fixed list.
 
 Your code MUST call:
 registerPower({
@@ -612,21 +1150,33 @@ The createProjectile(ctx) must return:
   radius: <number>,        // collision radius
   life: <number>,          // seconds (optional)
   state: <object>,         // optional per-projectile state
-  shape: {
-    draw(canvasCtx, proj, t) { /* draw custom shape */ }
-  },
-  trail: {
-    emit(world, proj, t) { /* push particles into world.particles with custom behavior */ }
-  },
+  shape: { draw(canvasCtx, proj, t) { /* draw custom shape */ } },
+  trail: { emit(world, proj, t) { /* push particles into world.particles */ } },
   onHitCharacter({ world, projectile, character, damage, spawnParticle, time }) { /* custom */ },
-  onHitDummy({ world, projectile, dummy, damage, spawnParticle, time }) { /* custom dummy effect */ }
+  onHitDummy({ world, projectile, dummy, damage, spawnParticle, time }) { /* custom dummy effect */ },
+  // OPTIONAL death hooks (called only when HP goes to 0 or below)
+  onKillDummy({ world, projectile, dummy, damage, prevHp, overkill, time }) { /* custom death effect */ },
+  onKillCharacter({ world, projectile, character, damage, prevHp, overkill, time }) { /* custom death effect */ }
 }
+
+Extra helpers:
+- ctx.applyDamageToPlayer(amount, sourceProjectile)
+- ctx.applyDamageToDummy(amount, sourceProjectile)
+
+Dummy effect system (available via ctx.dummyHelpers):
+- addKnockback(vx, vy, spin)
+- addFracture(amount, seed)
+- setAura(intensity, radius, hue, flicker)
+- setSurface({heat,frost,corrosion,wet,tint})
+- startDisintegration(amount, shedRate, eraseTo)
+- setStatus({poisoned, bleeding})
+- sliceDummy(partsCount, directionAngle)
+
+You can also directly set dummy.effects.deform.{squash,stretch,shearX,wave} for deformation.
 
 Notes:
 - Use only vanilla JS. No external libs. No presets.
 - Make the shape and trail feel unique: avoid "simple circle + simple line trail".
-- Dummy effect must be visible and distinct (change dummy.state, dummy.fx, dummy.split, or spawn particles).
-
 Return ONLY the JS code.
 `.trim();
 
@@ -635,186 +1185,138 @@ Return ONLY the JS code.
     log("Copied generation instructions to clipboard.");
   });
 
-  // ---------- Example power ----------
+  // ---------- Example power (showcases multiple dummy channels) ----------
   const EXAMPLE_POWER_CODE = `
 registerPower({
   meta: {
-    id: "prism_rip_01",
-    name: "Prism Rip",
-    description: "A jagged glass-prism bolt that leaves a refracting ribbon and 'cuts' the dummy along a slanted seam."
+    id: "fx_showcase_01",
+    name: "FX Showcase Bolt",
+    description: "A debug bolt that triggers different dummy effect channels each hit."
   },
 
   createProjectile(ctx) {
     const rng = ctx.rng;
 
-    // Build a custom 'shard prism' silhouette procedurally (no preset)
-    const points = [];
-    const spikes = 7 + Math.floor(rng() * 5);
-    for (let i = 0; i < spikes; i++) {
-      const ang = (i / spikes) * Math.PI * 2;
-      const r = 6 + rng() * 8 + (i % 2 ? rng() * 6 : 0);
-      points.push({ x: Math.cos(ang) * r, y: Math.sin(ang) * r * (0.6 + rng()*0.7) });
+    // custom jagged diamond
+    const pts = [];
+    const n = 9 + Math.floor(rng() * 5);
+    for (let i=0;i<n;i++){
+      const a = (i/n)*Math.PI*2;
+      const r = 6 + rng()*10 + (i%2? rng()*6:0);
+      pts.push({x:Math.cos(a)*r, y:Math.sin(a)*r*(0.7+rng()*0.6)});
     }
 
     return {
-      speed: 760,          // custom speed
-      damage: 34,          // custom damage
+      speed: 740,
+      damage: 20,
       radius: 12,
-      life: 2.4,
-      state: {
-        points,
-        hueShift: rng() * 360,
-        wobble: 0.8 + rng()*1.2
-      },
+      life: 2.2,
+      state: { pts, spin: (rng()<0.5?-1:1)*(3+rng()*4) },
 
       shape: {
-        draw(g, proj, t) {
-          const s = proj.state;
-          const ang = Math.atan2(proj.vy, proj.vx);
-          const wob = Math.sin(t * 9.0) * s.wobble;
-
+        draw(g, proj, t){
+          const s=proj.state;
+          const ang=Math.atan2(proj.vy, proj.vx);
           g.save();
           g.translate(proj.x, proj.y);
-          g.rotate(ang + wob * 0.06);
-
-          // outer glow
-          g.globalAlpha = 0.55;
-          g.fillStyle = "rgba(180,220,255,0.25)";
+          g.rotate(ang + t*s.spin*0.12);
+          g.globalAlpha=0.35;
+          g.fillStyle="rgba(200,245,255,0.18)";
           g.beginPath();
-          for (let i = 0; i < s.points.length; i++) {
-            const p = s.points[i];
-            const k = 1.25;
-            if (i === 0) g.moveTo(p.x*k, p.y*k);
-            else g.lineTo(p.x*k, p.y*k);
-          }
-          g.closePath();
-          g.fill();
-
-          // inner prism body
-          g.globalAlpha = 1;
-          g.fillStyle = "rgba(120,190,255,0.65)";
+          for(let i=0;i<s.pts.length;i++){ const p=s.pts[i]; if(i===0)g.moveTo(p.x*1.3,p.y*1.3); else g.lineTo(p.x*1.3,p.y*1.3); }
+          g.closePath(); g.fill();
+          g.globalAlpha=1;
+          g.fillStyle="rgba(140,220,255,0.55)";
           g.beginPath();
-          for (let i = 0; i < s.points.length; i++) {
-            const p = s.points[i];
-            const k = 0.95 + Math.sin(t*14 + i)*0.03;
-            if (i === 0) g.moveTo(p.x*k, p.y*k);
-            else g.lineTo(p.x*k, p.y*k);
-          }
-          g.closePath();
-          g.fill();
-
-          // fracture line
-          g.strokeStyle = "rgba(245,250,255,0.85)";
-          g.lineWidth = 2;
-          g.beginPath();
-          g.moveTo(-10, -4);
-          g.lineTo(12, 6);
-          g.stroke();
-
+          for(let i=0;i<s.pts.length;i++){ const p=s.pts[i]; if(i===0)g.moveTo(p.x,p.y); else g.lineTo(p.x,p.y); }
+          g.closePath(); g.fill();
+          g.strokeStyle="rgba(255,255,255,0.75)"; g.lineWidth=2; g.stroke();
           g.restore();
+          g.globalAlpha=1;
         }
       },
 
       trail: {
-        emit(world, proj, t) {
-          // Refracting ribbon trail: drifting quads that shear sideways
-          const nx = -proj.vy;
-          const ny = proj.vx;
-          const nlen = Math.max(1e-6, Math.hypot(nx, ny));
-          const ux = nx / nlen, uy = ny / nlen;
-
-          // spawn a few particles per frame
-          for (let i=0;i<2;i++) {
-            const off = (Math.random()*2 - 1) * 9;
+        emit(world, proj, t){
+          // ribbon trail
+          const vlen=Math.max(1e-6, Math.hypot(proj.vx, proj.vy));
+          const bx=-proj.vx/vlen, by=-proj.vy/vlen;
+          const px=-by, py=bx;
+          for(let i=0;i<2;i++){
+            const off=(Math.random()*2-1)*10;
             world.particles.push({
-              x: proj.x + ux*off,
-              y: proj.y + uy*off,
-              vx: ux * (40 + Math.random()*60) * (Math.random() < 0.5 ? -1 : 1),
-              vy: uy * (40 + Math.random()*60) * (Math.random() < 0.5 ? -1 : 1),
-              life: 0.55,
+              x: proj.x + px*off,
+              y: proj.y + py*off,
+              vx: bx*(60+Math.random()*90) + px*(Math.random()*50-25),
+              vy: by*(60+Math.random()*90) + py*(Math.random()*50-25),
+              life: 0.45+Math.random()*0.25,
               age: 0,
-              draw(g, pt) {
-                const a = 1 - (pt.age / pt.life);
-                g.globalAlpha = Math.max(0, a);
-                g.fillStyle = a > 0.6 ? "rgba(150,220,255,0.35)" : "rgba(210,245,255,0.22)";
-                g.save();
-                g.translate(pt.x, pt.y);
-                g.rotate((t*2.2 + pt.x*0.01) % (Math.PI*2));
-                g.fillRect(-6, -2, 12, 4);
-                g.restore();
-                g.globalAlpha = 1;
+              draw(g, pt){
+                const a=1-pt.age/pt.life;
+                g.globalAlpha=Math.max(0,a);
+                g.fillStyle=a>0.5?"rgba(180,240,255,0.20)":"rgba(255,255,255,0.10)";
+                g.fillRect(pt.x-6, pt.y-2, 12, 4);
+                g.globalAlpha=1;
               }
             });
           }
         }
       },
 
-      onHitCharacter({ world, character, damage, spawnParticle, time }) {
-        // If you later add enemies, this is a distinct custom effect:
-        // "prismatic nerve stutter" - briefly disorients (placeholder data field)
-        character.hitFx = character.hitFx || [];
-        character.hitFx.push({ type: "prism_stutter", at: time, duration: 0.35, intensity: 0.8 });
-      },
+      onHitCharacter(){},
 
-      onHitDummy({ world, dummy, damage, spawnParticle, time }) {
-        // Custom dummy effect: create a visible "cut seam" + brief phase shimmer
-        dummy.state = "phased";
+      onHitDummy({ dummy, projectile, time, world }){
+        // cycle effects
+        dummy._fxMode = (dummy._fxMode || 0) + 1;
+        const m = dummy._fxMode % 6;
+        const H = ctx.dummyHelpers;
 
-        // define a slash line across dummy
-        const x1 = dummy.x + 6;
-        const y1 = dummy.y + dummy.h * 0.25;
-        const x2 = dummy.x + dummy.w - 6;
-        const y2 = dummy.y + dummy.h * 0.75;
+        if(m===0){
+          H.addKnockback(260, -180, 18);
+          dummy.effects.deform.squash = 1;
+          dummy.effects.deform.wave = 0.7;
+        } else if(m===1){
+          H.setAura(1, 90, 180, 1.0);
+          H.addFracture(0.8);
+        } else if(m===2){
+          H.setSurface({ heat: 1 });
+          H.setStatus({ bleeding: 1 });
+        } else if(m===3){
+          H.setSurface({ corrosion: 1 });
+          H.setStatus({ poisoned: 1 });
+        } else if(m===4){
+          H.startDisintegration(1, 130, 0.9);
+          H.setAura(0.6, 120, 140, 0.8);
+        } else {
+          const ang=Math.atan2(projectile.vy, projectile.vx);
+          H.sliceDummy(8, ang);
+          H.addFracture(0.4);
+        }
 
-        dummy.split = { x1, y1, x2, y2, color: "rgba(220,250,255,0.9)" };
-
-        // spawn shard burst
-        for (let i=0;i<26;i++) {
-          const a = (i/26) * Math.PI*2;
-          const sp = 120 + Math.random()*220;
+        // impact burst
+        const cx=dummy.x+dummy.w*0.5, cy=dummy.y+dummy.h*0.5;
+        for(let i=0;i<22;i++){
+          const a=(i/22)*Math.PI*2;
+          const sp=120+Math.random()*220;
           world.particles.push({
-            x: (x1+x2)/2,
-            y: (y1+y2)/2,
-            vx: Math.cos(a)*sp,
-            vy: Math.sin(a)*sp,
-            life: 0.7,
-            age: 0,
-            draw(g, pt) {
-              const k = 1 - pt.age/pt.life;
-              g.globalAlpha = Math.max(0, k);
-              g.fillStyle = k > 0.5 ? "rgba(180,240,255,0.35)" : "rgba(255,255,255,0.18)";
-              g.fillRect(pt.x-1, pt.y-1, 2, 2);
-              g.globalAlpha = 1;
+            x:cx,y:cy,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,
+            life:0.55,age:0,
+            draw(g,pt){
+              const k=1-pt.age/pt.life;
+              g.globalAlpha=Math.max(0,k)*0.5;
+              g.fillStyle="rgba(220,250,255,0.18)";
+              g.fillRect(pt.x-1,pt.y-1,2,2);
+              g.globalAlpha=1;
             }
           });
         }
-
-        // auto-return to normal after a moment
-        dummy.fx.push({
-          age: 0,
-          life: 0.5,
-          draw(g, fx) {
-            const k = 1 - fx.age/fx.life;
-            g.globalAlpha = Math.max(0, k);
-            g.strokeStyle = "rgba(170,240,255,0.25)";
-            g.lineWidth = 2;
-            g.strokeRect(dummy.x-2, dummy.y-2, dummy.w+4, dummy.h+4);
-            g.globalAlpha = 1;
-          }
-        });
-
-        // schedule reset (simple)
-        setTimeout(() => {
-          dummy.state = "normal";
-          dummy.split = null;
-        }, 450);
       }
     };
   }
 });
 `.trim();
 
-  // Start loop
+  // ---------- Start loop ----------
   requestAnimationFrame(update);
 
 })();
