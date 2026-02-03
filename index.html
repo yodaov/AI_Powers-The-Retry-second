@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Power Sandbox (Paste Code)</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0f14; color:#e6edf3; }
+    .wrap { display:grid; grid-template-columns: 1.3fr 0.7fr; gap:12px; padding:12px; height:100vh; box-sizing:border-box; }
+    .card { background:#0f1620; border:1px solid #1f2a3a; border-radius:12px; overflow:hidden; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+    .topbar { display:flex; gap:8px; align-items:center; padding:10px; border-bottom:1px solid #1f2a3a; }
+    .btn { background:#1b2a3d; border:1px solid #2b3d57; color:#e6edf3; padding:8px 10px; border-radius:10px; cursor:pointer; }
+    .btn:hover { filter:brightness(1.08); }
+    .btn:active { transform: translateY(1px); }
+    .btn.primary { background:#2356a6; border-color:#2f6bd0; }
+    .btn.danger { background:#5a1e2a; border-color:#7b2a3b; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:#b9c6d6; padding:2px 6px; border:1px solid #2b3d57; border-radius:8px; background:#0b111a; }
+    canvas { width:100%; height:calc(100% - 44px); display:block; }
+    .side { display:flex; flex-direction:column; height:100%; }
+    .side .card { display:flex; flex-direction:column; min-height:0; }
+    .side .body { padding:10px; display:flex; flex-direction:column; gap:10px; min-height:0; }
+    textarea {
+      width:100%; min-height: 220px; resize: vertical;
+      background:#0b111a; color:#e6edf3; border:1px solid #2b3d57; border-radius:10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.35;
+      padding:10px; box-sizing:border-box;
+    }
+    .row { display:flex; gap:8px; flex-wrap:wrap; }
+    .small { font-size:12px; color:#b9c6d6; line-height:1.35; }
+    .log {
+      background:#0b111a; border:1px solid #2b3d57; border-radius:10px;
+      padding:10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size:12px; color:#cfe3ff; overflow:auto; min-height:120px; max-height:220px;
+      white-space:pre-wrap;
+    }
+    .pill { padding:2px 8px; border:1px solid #2b3d57; border-radius:999px; background:#0b111a; font-size:12px; color:#b9c6d6; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="topbar">
+        <button class="btn primary" id="btnFire">Fire <span class="kbd">Space</span></button>
+        <button class="btn" id="btnReset">Reset Arena</button>
+        <span class="pill" id="statusPill">No power loaded</span>
+        <span style="margin-left:auto" class="small">Aim with mouse • Move <span class="kbd">WASD</span></span>
+      </div>
+      <canvas id="cv"></canvas>
+    </div>
+
+    <div class="side">
+      <div class="card" style="flex:1">
+        <div class="topbar">
+          <button class="btn" id="btnCopyInstructions">Copy Instructions</button>
+          <button class="btn" id="btnLoadPower">Load Pasted Power</button>
+          <button class="btn danger" id="btnLoadExample">Load Example</button>
+        </div>
+        <div class="body">
+          <div class="small">
+            Paste a <b>power module</b> that calls <span class="kbd">registerPower(...)</span>.
+            Your code is executed locally in this page.
+          </div>
+          <textarea id="powerCode" spellcheck="false" placeholder="// Paste power code here..."></textarea>
+          <div class="row">
+            <button class="btn" id="btnClear">Clear</button>
+            <button class="btn" id="btnCopyLastPower">Copy Last Loaded</button>
+          </div>
+          <div class="small">
+            Console / errors:
+          </div>
+          <div class="log" id="log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/**
+ * POWER SANDBOX CORE
+ * - Arena: left = player, right = dummy.
+ * - Paste code defines a projectile/blast power with custom:
+ *   shape, trail, speed, damage, onHitCharacter, dummy effect
+ * - Your pasted code must call registerPower({...})
+ *
+ * SECURITY NOTE:
+ * This uses Function() to run pasted JS. Only paste code you trust.
+ */
+
+(() => {
+  // ---------- Utilities ----------
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const now = () => performance.now();
+
+  function randSeeded(seed) {
+    // small deterministic RNG
+    let s = seed >>> 0;
+    return () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return (s & 0xfffffff) / 0x10000000;
+    };
+  }
+
+  // ---------- DOM ----------
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const logEl = document.getElementById("log");
+  const statusPill = document.getElementById("statusPill");
+
+  const powerCodeEl = document.getElementById("powerCode");
+  const btnLoadPower = document.getElementById("btnLoadPower");
+  const btnLoadExample = document.getElementById("btnLoadExample");
+  const btnCopyInstructions = document.getElementById("btnCopyInstructions");
+  const btnFire = document.getElementById("btnFire");
+  const btnReset = document.getElementById("btnReset");
+  const btnClear = document.getElementById("btnClear");
+  const btnCopyLastPower = document.getElementById("btnCopyLastPower");
+
+  function log(msg) {
+    logEl.textContent += (logEl.textContent ? "\n" : "") + msg;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function clearLog() { logEl.textContent = ""; }
+
+  // ---------- Canvas sizing ----------
+  function resize() {
+    const rect = cv.getBoundingClientRect();
+    const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    cv.width = Math.floor(rect.width * dpr);
+    cv.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------- World ----------
+  const world = {
+    w: () => cv.getBoundingClientRect().width,
+    h: () => cv.getBoundingClientRect().height,
+    time: 0,
+    dt: 0,
+    last: now(),
+
+    player: { x: 140, y: 220, r: 16, hp: 100, hitFx: [] },
+    dummy:  { x: 0, y: 0, w: 54, h: 90, hp: 999, state: "normal", fx: [], split: null },
+
+    projectiles: [],
+    particles: [],
+    currentPower: null,
+    lastLoadedCode: "",
+    mouse: { x: 0, y: 0, down: false },
+    keys: new Set(),
+  };
+
+  function resetArena() {
+    world.projectiles.length = 0;
+    world.particles.length = 0;
+    world.player.hp = 100;
+    world.player.hitFx.length = 0;
+
+    world.dummy.hp = 999;
+    world.dummy.state = "normal";
+    world.dummy.fx.length = 0;
+    world.dummy.split = null;
+
+    // Place dummy on right half
+    const W = world.w(), H = world.h();
+    world.player.x = 140;
+    world.player.y = H * 0.5;
+
+    world.dummy.x = W - 180;
+    world.dummy.y = H * 0.5 - world.dummy.h * 0.5;
+
+    log("Arena reset.");
+  }
+
+  resetArena();
+
+  // ---------- Input ----------
+  cv.addEventListener("mousemove", (e) => {
+    const rect = cv.getBoundingClientRect();
+    world.mouse.x = e.clientX - rect.left;
+    world.mouse.y = e.clientY - rect.top;
+  });
+  cv.addEventListener("mousedown", () => world.mouse.down = true);
+  window.addEventListener("mouseup", () => world.mouse.down = false);
+
+  window.addEventListener("keydown", (e) => {
+    world.keys.add(e.code);
+    if (e.code === "Space") {
+      e.preventDefault();
+      fire();
+    }
+  });
+  window.addEventListener("keyup", (e) => world.keys.delete(e.code));
+
+  // ---------- Power API ----------
+  function validatePower(p) {
+    const required = [
+      "meta", "createProjectile"
+    ];
+    for (const k of required) {
+      if (!(k in p)) throw new Error(`Power missing required field: ${k}`);
+    }
+    // meta checks
+    const m = p.meta || {};
+    for (const k of ["name", "id", "description"]) {
+      if (!m[k]) throw new Error(`Power meta missing: meta.${k}`);
+    }
+    // createProjectile must return projectile spec
+    if (typeof p.createProjectile !== "function") throw new Error(`createProjectile must be a function`);
+  }
+
+  function setCurrentPower(power, sourceCode) {
+    validatePower(power);
+    world.currentPower = power;
+    world.lastLoadedCode = sourceCode || "";
+    statusPill.textContent = `Loaded: ${power.meta.name} (${power.meta.id})`;
+    log(`Loaded power: ${power.meta.name} (${power.meta.id})`);
+  }
+
+  // Exposed to pasted scripts:
+  // registerPower({ meta:{...}, createProjectile(ctx){...} })
+  function registerPower(powerDef) {
+    setCurrentPower(powerDef, "__PASTED__");
+  }
+
+  // "Game context" passed into power.createProjectile
+  function powerContext() {
+    return {
+      // Positions
+      player: { x: world.player.x, y: world.player.y },
+      mouse:  { x: world.mouse.x, y: world.mouse.y },
+
+      // Arena split
+      arena: {
+        width: world.w(),
+        height: world.h(),
+        midX: world.w() * 0.5
+      },
+
+      // Utilities for custom behavior
+      clamp, lerp,
+
+      // Visual spawning helpers (optional for powers)
+      spawnParticle: (pt) => world.particles.push(pt),
+
+      // Deterministic randomness for power-specific visuals
+      rng: randSeeded((Math.random() * 1e9) | 0)
+    };
+  }
+
+  // ---------- Projectile creation ----------
+  function spawnProjectileFromPower() {
+    const P = world.currentPower;
+    if (!P) return;
+
+    const ctxIn = powerContext();
+    const spec = P.createProjectile(ctxIn);
+
+    // Required projectile fields
+    const must = ["speed", "damage", "shape", "trail", "onHitCharacter", "onHitDummy"];
+    for (const k of must) {
+      if (!(k in spec)) throw new Error(`Projectile spec missing: ${k}`);
+    }
+    if (typeof spec.shape.draw !== "function") throw new Error("shape.draw(ctx, proj, t) must be a function");
+    if (typeof spec.trail.emit !== "function") throw new Error("trail.emit(world, proj, t) must be a function");
+    if (typeof spec.onHitCharacter !== "function") throw new Error("onHitCharacter must be a function");
+    if (typeof spec.onHitDummy !== "function") throw new Error("onHitDummy must be a function");
+
+    // Aim vector
+    const dx = (world.mouse.x - world.player.x);
+    const dy = (world.mouse.y - world.player.y);
+    const len = Math.max(1e-6, Math.hypot(dx, dy));
+    const vx = (dx / len) * spec.speed;
+    const vy = (dy / len) * spec.speed;
+
+    world.projectiles.push({
+      x: world.player.x,
+      y: world.player.y,
+      vx, vy,
+      speed: spec.speed,
+      damage: spec.damage,
+      life: spec.life ?? 2.8, // seconds
+      age: 0,
+      radius: spec.radius ?? 10, // collision radius
+      shape: spec.shape,
+      trail: spec.trail,
+      onHitCharacter: spec.onHitCharacter,
+      onHitDummy: spec.onHitDummy,
+
+      // power-owned state bucket (so each projectile can be unique)
+      state: spec.state ?? {},
+      meta: spec.meta ?? {}
+    });
+  }
+
+  // ---------- Fire ----------
+  function fire() {
+    try {
+      if (!world.currentPower) {
+        log("No power loaded.");
+        return;
+      }
+      spawnProjectileFromPower();
+    } catch (err) {
+      log("FIRE ERROR: " + (err?.message || err));
+    }
+  }
+  btnFire.addEventListener("click", fire);
+
+  // ---------- Movement ----------
+  function stepMovement(dt) {
+    // Player movement
+    const sp = 220;
+    let mx = 0, my = 0;
+    if (world.keys.has("KeyW")) my -= 1;
+    if (world.keys.has("KeyS")) my += 1;
+    if (world.keys.has("KeyA")) mx -= 1;
+    if (world.keys.has("KeyD")) mx += 1;
+    const ml = Math.hypot(mx, my);
+    if (ml > 0) { mx /= ml; my /= ml; }
+
+    world.player.x += mx * sp * dt;
+    world.player.y += my * sp * dt;
+
+    // Clamp player to left half
+    const W = world.w(), H = world.h();
+    world.player.x = clamp(world.player.x, 30, W * 0.5 - 30);
+    world.player.y = clamp(world.player.y, 30, H - 30);
+
+    // Dummy stays on right half
+    world.dummy.x = clamp(world.dummy.x, W * 0.5 + 30, W - 30 - world.dummy.w);
+    world.dummy.y = clamp(world.dummy.y, 30, H - 30 - world.dummy.h);
+  }
+
+  // ---------- Collisions ----------
+  function circleRectCollides(cx, cy, r, rx, ry, rw, rh) {
+    const px = clamp(cx, rx, rx + rw);
+    const py = clamp(cy, ry, ry + rh);
+    const dx = cx - px, dy = cy - py;
+    return (dx*dx + dy*dy) <= r*r;
+  }
+
+  function hitDummy(proj) {
+    try {
+      proj.onHitDummy({
+        world,
+        projectile: proj,
+        dummy: world.dummy,
+        damage: proj.damage,
+        spawnParticle: (pt) => world.particles.push(pt),
+        time: world.time
+      });
+    } catch (e) {
+      log("onHitDummy ERROR: " + (e?.message || e));
+    }
+  }
+
+  // (Optional: if you later add enemies or self-damage)
+  function hitCharacter(proj, character) {
+    try {
+      proj.onHitCharacter({
+        world,
+        projectile: proj,
+        character,
+        damage: proj.damage,
+        spawnParticle: (pt) => world.particles.push(pt),
+        time: world.time
+      });
+    } catch (e) {
+      log("onHitCharacter ERROR: " + (e?.message || e));
+    }
+  }
+
+  // ---------- Update loop ----------
+  function update() {
+    const t = now();
+    world.dt = Math.min(0.033, (t - world.last) / 1000);
+    world.last = t;
+    world.time += world.dt;
+
+    stepMovement(world.dt);
+
+    // Update projectiles
+    for (let i = world.projectiles.length - 1; i >= 0; i--) {
+      const p = world.projectiles[i];
+      p.age += world.dt;
+      p.x += p.vx * world.dt;
+      p.y += p.vy * world.dt;
+
+      // trail emit (custom)
+      try { p.trail.emit(world, p, world.time); }
+      catch (e) { log("trail.emit ERROR: " + (e?.message || e)); }
+
+      // collision with dummy
+      const d = world.dummy;
+      if (circleRectCollides(p.x, p.y, p.radius, d.x, d.y, d.w, d.h)) {
+        hitDummy(p);
+        world.projectiles.splice(i, 1);
+        continue;
+      }
+
+      // out of bounds or expired
+      const W = world.w(), H = world.h();
+      if (p.age > p.life || p.x < -80 || p.y < -80 || p.x > W + 80 || p.y > H + 80) {
+        world.projectiles.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Update particles
+    for (let i = world.particles.length - 1; i >= 0; i--) {
+      const pt = world.particles[i];
+      pt.age = (pt.age ?? 0) + world.dt;
+      const life = pt.life ?? 0.6;
+      if (pt.age >= life) { world.particles.splice(i, 1); continue; }
+      if (pt.vx) pt.x += pt.vx * world.dt;
+      if (pt.vy) pt.y += pt.vy * world.dt;
+      if (pt.update) pt.update(world, pt, world.dt);
+    }
+
+    // Update dummy fx
+    for (let i = world.dummy.fx.length - 1; i >= 0; i--) {
+      const fx = world.dummy.fx[i];
+      fx.age = (fx.age ?? 0) + world.dt;
+      if (fx.life != null && fx.age >= fx.life) world.dummy.fx.splice(i, 1);
+    }
+
+    render();
+    requestAnimationFrame(update);
+  }
+
+  // ---------- Render ----------
+  function render() {
+    const W = world.w(), H = world.h();
+    ctx.clearRect(0, 0, W, H);
+
+    // background
+    ctx.fillStyle = "#070a0f";
+    ctx.fillRect(0, 0, W, H);
+
+    // arena split
+    ctx.fillStyle = "#0a0f16";
+    ctx.fillRect(0, 0, W * 0.5, H);
+    ctx.fillStyle = "#090d13";
+    ctx.fillRect(W * 0.5, 0, W * 0.5, H);
+
+    ctx.strokeStyle = "#233245";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5, 0);
+    ctx.lineTo(W * 0.5, H);
+    ctx.stroke();
+
+    // player
+    ctx.fillStyle = "#6fb1ff";
+    ctx.beginPath();
+    ctx.arc(world.player.x, world.player.y, world.player.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // aim line
+    ctx.strokeStyle = "#1e3550";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(world.player.x, world.player.y);
+    ctx.lineTo(world.mouse.x, world.mouse.y);
+    ctx.stroke();
+
+    // dummy
+    drawDummy(ctx, world.dummy);
+
+    // particles
+    for (const pt of world.particles) {
+      if (pt.draw) {
+        pt.draw(ctx, pt, world.time);
+      } else {
+        // default tiny spark
+        const a = 1 - (pt.age / (pt.life ?? 0.6));
+        ctx.globalAlpha = clamp(a, 0, 1);
+        ctx.fillStyle = pt.color ?? "#8bd3ff";
+        ctx.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // projectiles
+    for (const p of world.projectiles) {
+      try { p.shape.draw(ctx, p, world.time); }
+      catch (e) { /* logged elsewhere */ }
+    }
+
+    // HUD
+    ctx.fillStyle = "#b9c6d6";
+    ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.fillText(`Projectiles: ${world.projectiles.length}`, 12, 18);
+    ctx.fillText(`Dummy state: ${world.dummy.state}`, 12, 34);
+  }
+
+  function drawDummy(ctx, d) {
+    // base dummy
+    ctx.save();
+
+    // dummy effects: e.g. vanish
+    if (d.state === "erased") {
+      ctx.globalAlpha = 0.08;
+    }
+    if (d.state === "phased") {
+      ctx.globalAlpha = 0.35;
+    }
+
+    // body
+    ctx.fillStyle = "#ffb86b";
+    ctx.fillRect(d.x, d.y, d.w, d.h);
+
+    // face mark
+    ctx.fillStyle = "#3a2a1a";
+    ctx.fillRect(d.x + 10, d.y + 16, 8, 8);
+    ctx.fillRect(d.x + d.w - 18, d.y + 16, 8, 8);
+
+    // split effect
+    if (d.split) {
+      const s = d.split;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = s.color ?? "#d7f7ff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(s.x1, s.y1);
+      ctx.lineTo(s.x2, s.y2);
+      ctx.stroke();
+    }
+
+    // fx overlays
+    for (const fx of d.fx) {
+      if (fx.draw) fx.draw(ctx, fx, world.time);
+    }
+
+    ctx.restore();
+  }
+
+  // ---------- Paste code loader ----------
+  function loadPastedPower(code) {
+    clearLog();
+
+    // Provide ONLY what power code needs.
+    // The power must call registerPower(...)
+    const sandboxGlobals = {
+      registerPower
+    };
+
+    // Execute in a tiny scope
+    // (Still runs JS: do not paste untrusted code.)
+    const fn = new Function(...Object.keys(sandboxGlobals), `"use strict";\n${code}\n`);
+    fn(...Object.values(sandboxGlobals));
+  }
+
+  btnLoadPower.addEventListener("click", () => {
+    try {
+      const code = powerCodeEl.value.trim();
+      if (!code) return log("Nothing to load.");
+      loadPastedPower(code);
+      // Save last loaded code
+      world.lastLoadedCode = code;
+      // If registerPower used, setCurrentPower already called.
+      if (!world.currentPower) log("Loaded code did not call registerPower(...).");
+    } catch (e) {
+      log("LOAD ERROR: " + (e?.message || e));
+      world.currentPower = null;
+      statusPill.textContent = "No power loaded";
+    }
+  });
+
+  btnLoadExample.addEventListener("click", () => {
+    powerCodeEl.value = EXAMPLE_POWER_CODE.trim();
+    log("Example pasted. Click 'Load Pasted Power'.");
+  });
+
+  btnReset.addEventListener("click", resetArena);
+  btnClear.addEventListener("click", () => powerCodeEl.value = "");
+  btnCopyLastPower.addEventListener("click", async () => {
+    const txt = world.lastLoadedCode || powerCodeEl.value || "";
+    if (!txt) return log("No code to copy.");
+    await navigator.clipboard.writeText(txt);
+    log("Copied last power code to clipboard.");
+  });
+
+  // ---------- Copy instructions ----------
+  const INSTRUCTIONS_TEXT = `
+You are generating a SINGLE JavaScript power module for a projectile/blast sandbox.
+The output MUST be ONLY code. No markdown. No explanation.
+
+HARD REQUIREMENTS (minimum valid power):
+- The power is a projectile/blast.
+- Projectile MUST have a custom shape made from scratch (unique geometry/visual form).
+- Projectile MUST have a custom trail (not a standard line; it must have unique behavior).
+- Custom travel speed (explicit numeric speed + any motion behavior if desired).
+- Custom damage (explicit numeric).
+- Custom on-hit effect for characters: entirely customized and specific.
+- Custom dummy effect: entirely customized and specific (e.g., slice, erase, transform, invert, shatter, etc.), not limited to a fixed list.
+
+Your code MUST call:
+registerPower({
+  meta: { id: "unique_id", name: "Power Name", description: "1-2 lines" },
+  createProjectile(ctx) { return projectileSpec; }
+});
+
+The createProjectile(ctx) must return:
+{
+  speed: <number>,         // pixels/sec
+  damage: <number>,
+  radius: <number>,        // collision radius
+  life: <number>,          // seconds (optional)
+  state: <object>,         // optional per-projectile state
+  shape: {
+    draw(canvasCtx, proj, t) { /* draw custom shape */ }
+  },
+  trail: {
+    emit(world, proj, t) { /* push particles into world.particles with custom behavior */ }
+  },
+  onHitCharacter({ world, projectile, character, damage, spawnParticle, time }) { /* custom */ },
+  onHitDummy({ world, projectile, dummy, damage, spawnParticle, time }) { /* custom dummy effect */ }
+}
+
+Notes:
+- Use only vanilla JS. No external libs. No presets.
+- Make the shape and trail feel unique: avoid "simple circle + simple line trail".
+- Dummy effect must be visible and distinct (change dummy.state, dummy.fx, dummy.split, or spawn particles).
+
+Return ONLY the JS code.
+`.trim();
+
+  btnCopyInstructions.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(INSTRUCTIONS_TEXT);
+    log("Copied generation instructions to clipboard.");
+  });
+
+  // ---------- Example power ----------
+  const EXAMPLE_POWER_CODE = `
+registerPower({
+  meta: {
+    id: "prism_rip_01",
+    name: "Prism Rip",
+    description: "A jagged glass-prism bolt that leaves a refracting ribbon and 'cuts' the dummy along a slanted seam."
+  },
+
+  createProjectile(ctx) {
+    const rng = ctx.rng;
+
+    // Build a custom 'shard prism' silhouette procedurally (no preset)
+    const points = [];
+    const spikes = 7 + Math.floor(rng() * 5);
+    for (let i = 0; i < spikes; i++) {
+      const ang = (i / spikes) * Math.PI * 2;
+      const r = 6 + rng() * 8 + (i % 2 ? rng() * 6 : 0);
+      points.push({ x: Math.cos(ang) * r, y: Math.sin(ang) * r * (0.6 + rng()*0.7) });
+    }
+
+    return {
+      speed: 760,          // custom speed
+      damage: 34,          // custom damage
+      radius: 12,
+      life: 2.4,
+      state: {
+        points,
+        hueShift: rng() * 360,
+        wobble: 0.8 + rng()*1.2
+      },
+
+      shape: {
+        draw(g, proj, t) {
+          const s = proj.state;
+          const ang = Math.atan2(proj.vy, proj.vx);
+          const wob = Math.sin(t * 9.0) * s.wobble;
+
+          g.save();
+          g.translate(proj.x, proj.y);
+          g.rotate(ang + wob * 0.06);
+
+          // outer glow
+          g.globalAlpha = 0.55;
+          g.fillStyle = "rgba(180,220,255,0.25)";
+          g.beginPath();
+          for (let i = 0; i < s.points.length; i++) {
+            const p = s.points[i];
+            const k = 1.25;
+            if (i === 0) g.moveTo(p.x*k, p.y*k);
+            else g.lineTo(p.x*k, p.y*k);
+          }
+          g.closePath();
+          g.fill();
+
+          // inner prism body
+          g.globalAlpha = 1;
+          g.fillStyle = "rgba(120,190,255,0.65)";
+          g.beginPath();
+          for (let i = 0; i < s.points.length; i++) {
+            const p = s.points[i];
+            const k = 0.95 + Math.sin(t*14 + i)*0.03;
+            if (i === 0) g.moveTo(p.x*k, p.y*k);
+            else g.lineTo(p.x*k, p.y*k);
+          }
+          g.closePath();
+          g.fill();
+
+          // fracture line
+          g.strokeStyle = "rgba(245,250,255,0.85)";
+          g.lineWidth = 2;
+          g.beginPath();
+          g.moveTo(-10, -4);
+          g.lineTo(12, 6);
+          g.stroke();
+
+          g.restore();
+        }
+      },
+
+      trail: {
+        emit(world, proj, t) {
+          // Refracting ribbon trail: drifting quads that shear sideways
+          const nx = -proj.vy;
+          const ny = proj.vx;
+          const nlen = Math.max(1e-6, Math.hypot(nx, ny));
+          const ux = nx / nlen, uy = ny / nlen;
+
+          // spawn a few particles per frame
+          for (let i=0;i<2;i++) {
+            const off = (Math.random()*2 - 1) * 9;
+            world.particles.push({
+              x: proj.x + ux*off,
+              y: proj.y + uy*off,
+              vx: ux * (40 + Math.random()*60) * (Math.random() < 0.5 ? -1 : 1),
+              vy: uy * (40 + Math.random()*60) * (Math.random() < 0.5 ? -1 : 1),
+              life: 0.55,
+              age: 0,
+              draw(g, pt) {
+                const a = 1 - (pt.age / pt.life);
+                g.globalAlpha = Math.max(0, a);
+                g.fillStyle = a > 0.6 ? "rgba(150,220,255,0.35)" : "rgba(210,245,255,0.22)";
+                g.save();
+                g.translate(pt.x, pt.y);
+                g.rotate((t*2.2 + pt.x*0.01) % (Math.PI*2));
+                g.fillRect(-6, -2, 12, 4);
+                g.restore();
+                g.globalAlpha = 1;
+              }
+            });
+          }
+        }
+      },
+
+      onHitCharacter({ world, character, damage, spawnParticle, time }) {
+        // If you later add enemies, this is a distinct custom effect:
+        // "prismatic nerve stutter" - briefly disorients (placeholder data field)
+        character.hitFx = character.hitFx || [];
+        character.hitFx.push({ type: "prism_stutter", at: time, duration: 0.35, intensity: 0.8 });
+      },
+
+      onHitDummy({ world, dummy, damage, spawnParticle, time }) {
+        // Custom dummy effect: create a visible "cut seam" + brief phase shimmer
+        dummy.state = "phased";
+
+        // define a slash line across dummy
+        const x1 = dummy.x + 6;
+        const y1 = dummy.y + dummy.h * 0.25;
+        const x2 = dummy.x + dummy.w - 6;
+        const y2 = dummy.y + dummy.h * 0.75;
+
+        dummy.split = { x1, y1, x2, y2, color: "rgba(220,250,255,0.9)" };
+
+        // spawn shard burst
+        for (let i=0;i<26;i++) {
+          const a = (i/26) * Math.PI*2;
+          const sp = 120 + Math.random()*220;
+          world.particles.push({
+            x: (x1+x2)/2,
+            y: (y1+y2)/2,
+            vx: Math.cos(a)*sp,
+            vy: Math.sin(a)*sp,
+            life: 0.7,
+            age: 0,
+            draw(g, pt) {
+              const k = 1 - pt.age/pt.life;
+              g.globalAlpha = Math.max(0, k);
+              g.fillStyle = k > 0.5 ? "rgba(180,240,255,0.35)" : "rgba(255,255,255,0.18)";
+              g.fillRect(pt.x-1, pt.y-1, 2, 2);
+              g.globalAlpha = 1;
+            }
+          });
+        }
+
+        // auto-return to normal after a moment
+        dummy.fx.push({
+          age: 0,
+          life: 0.5,
+          draw(g, fx) {
+            const k = 1 - fx.age/fx.life;
+            g.globalAlpha = Math.max(0, k);
+            g.strokeStyle = "rgba(170,240,255,0.25)";
+            g.lineWidth = 2;
+            g.strokeRect(dummy.x-2, dummy.y-2, dummy.w+4, dummy.h+4);
+            g.globalAlpha = 1;
+          }
+        });
+
+        // schedule reset (simple)
+        setTimeout(() => {
+          dummy.state = "normal";
+          dummy.split = null;
+        }, 450);
+      }
+    };
+  }
+});
+`.trim();
+
+  // Start loop
+  requestAnimationFrame(update);
+
+})();
+</script>
+</body>
+</html>
